@@ -9,18 +9,17 @@ import time
 from dotenv import load_dotenv
 import pinecone
 from pinecone import ServerlessSpec
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_pinecone import PineconeVectorStore
-from langchain_community.chat_models import ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.docstore.document import Document
 from pydantic import BaseModel
-import git
 from PyPDF2 import PdfReader
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Set custom temp directory
 tempfile.tempdir = "C:\\Users\\User\\Desktop\\Mark Musk\\temp"
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-from utils.config import get_openai_config, get_pinecone_config, get_app_config
+from utils.config import get_pinecone_config, get_app_config
 
 class BotService:
     def __init__(self, fastapi_url: str):
@@ -40,7 +39,6 @@ class BotService:
 
         # Load configurations
         try:
-            self.openai_config = get_openai_config()
             self.pinecone_config = get_pinecone_config()
             self.app_config = get_app_config()
         except Exception as e:
@@ -60,14 +58,18 @@ class BotService:
                 logger.error(f"Missing Pinecone configuration key: {key}")
                 raise ValueError(f"Missing required Pinecone configuration key: {key}")
 
-        # Set OpenAI API key
-        os.environ["OPENAI_API_KEY"] = self.openai_config["api_key"]
+        # Set Google API key
+        os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
         # Initialize embeddings
         try:
-            self.embeddings = OpenAIEmbeddings(disallowed_special=())
+            self.embeddings = GoogleGenerativeAIEmbeddings(
+                model="models/text-embedding-004",
+                google_api_key=os.getenv("GOOGLE_API_KEY")
+            )
+            logger.info(f"Using embedding model: text-embedding-004 (768 dimensions)")
         except Exception as e:
-            logger.error(f"Failed to initialize OpenAI embeddings: {e}")
+            logger.error(f"Failed to initialize Gemini embeddings: {e}")
             raise
 
         # Initialize Pinecone
@@ -85,9 +87,9 @@ class BotService:
                 logger.info(f"Creating Pinecone index: {index_name}")
                 self.pinecone_instance.create_index(
                     name=index_name,
-                    dimension=1536,
+                    dimension=768,  # Updated for text-embedding-004
                     metric="cosine",
-                    spec=ServerlessSpec(cloud="aws", region="us-west-2")
+                    spec=ServerlessSpec(cloud="aws", region="us-east-1")
                 )
         except Exception as e:
             logger.error(f"Failed to create Pinecone index: {e}")
@@ -106,12 +108,14 @@ class BotService:
 
         # Initialize LLM
         try:
-            self.llm = ChatOpenAI(
-                model=self.openai_config.get("model", "gpt-3.5-turbo"),
-                temperature=self.openai_config.get("temperature", 0.7)
+            self.llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                api_key=os.getenv("GOOGLE_API_KEY"),
+                temperature=0.7
             )
+            logger.info(f"Using LLM: gemini-1.5-flash")
         except Exception as e:
-            logger.error(f"Failed to initialize ChatOpenAI: {e}")
+            logger.error(f"Failed to initialize ChatGoogleGenerativeAI: {e}")
             raise
 
         # Initialize memory
@@ -121,9 +125,9 @@ class BotService:
         )
 
         # Define prompt template
-        self.qa_template = """You are Mark Musk, an AI assistant specialized in CreditChek API integration.
-Use the following pieces of context to answer the question at the end.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
+        self.qa_template = """You are Mark Musk, an AI assistant specialized in CreditChek API and SDK integration.
+Provide detailed, code-focused answers for SDK questions, including examples where possible.
+Use the following context to answer the question. If you don't know, say so.
 
 Context: {context}
 
@@ -178,14 +182,21 @@ Answer:"""
                 return
             
             self.sample_docs = [
+                Document(page_content="To authenticate with CreditChek API...", metadata={"source": "sample_auth", "content": "..."}),
+                Document(page_content="CreditChek API provides identity verification...", metadata={"source": "sample_identity", "content": "..."}),
+    
                 Document(
-                    page_content="To authenticate with CreditChek API, you need to obtain an API key from the dashboard. Include it in the header of all requests as 'Authorization: Bearer YOUR_API_KEY'. All API requests must be made over HTTPS to ensure security.",
-                    metadata={"source": "sample_auth", "content": "To authenticate with CreditChek API, you need to obtain an API key from the dashboard. Include it in the header of all requests as 'Authorization: Bearer YOUR_API_KEY'. All API requests must be made over HTTPS to ensure security."}
+                    page_content="CreditChek webhooks enable real-time transaction updates. Register a webhook URL in the dashboard and handle POST requests with JSON payloads containing transaction_id, status, and amount.",
+                    metadata={"source": "sample_webhooks", "content": "..."}
                 ),
                 Document(
-                    page_content="CreditChek API provides identity verification through the /api/v1/identity endpoint. This endpoint requires parameters like first_name, last_name, dob, and id_number.",
-                    metadata={"source": "sample_identity", "content": "CreditChek API provides identity verification through the /api/v1/identity endpoint. This endpoint requires parameters like first_name, last_name, dob, and id_number."}
-                )
+                    page_content="RecovaPRO SDK: Initialize with `from creditchek import RecovaPRO; client = RecovaPRO(api_key='YOUR_API_KEY')`. Use client.verify_identity(first_name='John', last_name='Doe') for identity checks.",
+                    metadata={"source": "sample_sdk", "content": "..."}
+                ),
+                Document(
+                    page_content="Schedule payments via /api/v1/payments/schedule. POST with amount, recipient, and schedule_date. Requires Authorization: Bearer YOUR_API_KEY.",
+                    metadata={"source": "sample_payments", "content": "..."}
+                ),
             ]
             logger.info("Indexing sample documents")
             self._upload_documents_in_batches(self.sample_docs, batch_size=5)
@@ -193,8 +204,15 @@ Answer:"""
             logger.error(f"Failed to index sample documents: {e}")
             raise
 
-    def _upload_documents_in_batches(self, documents: List[Document], batch_size: int = 10) -> None:
-        """Upload documents to Pinecone in batches with size estimation."""
+    def _upload_documents_in_batches(self, documents: List[Document], batch_size: int = 50) -> None:
+        """Upload documents to Pinecone in batches with size estimation and parallel embedding."""
+        def embed_batch(batch: List[Document]) -> List[List[float]]:
+            try:
+                return self.embeddings.embed_documents([doc.page_content for doc in batch])
+            except Exception as e:
+                logger.error(f"Failed to embed batch: {e}")
+                raise
+
         for doc in documents:
             content_size = len(doc.page_content.encode('utf-8')) / 1024
             metadata_size = sys.getsizeof(doc.metadata) / 1024
@@ -205,36 +223,49 @@ Answer:"""
                                f"content size {content_size:.2f} KB exceeds 500KB")
                 continue
         
-        for i in range(0, len(documents), batch_size):
-            batch = documents[i:i + batch_size]
-            start_time = time.time()
-            batch_size_bytes = sum(len(doc.page_content.encode('utf-8')) + sys.getsizeof(doc.metadata) for doc in batch)
-            embedding_size = len(batch) * 1536 * 4
-            total_batch_size = batch_size_bytes + embedding_size
-            logger.info(f"Uploading batch {i // batch_size + 1} with {len(batch)} documents, "
-                        f"estimated size: {total_batch_size / (1024 * 1024):.2f} MB "
-                        f"(content+metadata: {batch_size_bytes / (1024 * 1024):.2f} MB, "
-                        f"embeddings: {embedding_size / (1024 * 1024):.2f} MB)")
-            try:
-                embeddings = self.embeddings.embed_documents([doc.page_content for doc in batch])
-                vectors = [
-                    (
-                        f"doc_{i+j}",
-                        emb,
-                        {**doc.metadata, "content": doc.page_content} if doc.metadata else {"content": doc.page_content}
-                    )
-                    for j, (emb, doc) in enumerate(zip(embeddings, batch))
-                ]
-                index = self.pinecone_instance.Index(self.pinecone_config["PINECONE_INDEX"])
-                index.upsert(vectors=vectors, namespace=self.pinecone_config.get("namespace", None))
-                logger.info(f"Batch {i // batch_size + 1} uploaded in {time.time() - start_time:.2f} seconds")
-            except Exception as e:
-                logger.error(f"Failed to upload batch {i // batch_size + 1}: {e}")
-                raise
+        # Parallel embedding with ThreadPoolExecutor
+        max_workers = 4  # Adjust based on Google API rate limits and CPU cores
+        batches = [documents[i:i + batch_size] for i in range(0, len(documents), batch_size)]
+        total_start_time = time.time()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_batch = {}
+            for i, batch in enumerate(batches):
+                batch_size_bytes = sum(len(doc.page_content.encode('utf-8')) + sys.getsizeof(doc.metadata) for doc in batch)
+                embedding_size = len(batch) * 768 * 4  # Updated for text-embedding-004
+                total_batch_size = batch_size_bytes + embedding_size
+                logger.info(f"Submitting batch {i + 1} with {len(batch)} documents, "
+                            f"estimated size: {total_batch_size / (1024 * 1024):.2f} MB "
+                            f"(content+metadata: {batch_size_bytes / (1024 * 1024):.2f} MB, "
+                            f"embeddings: {embedding_size / (1024 * 1024):.2f} MB)")
+                future_to_batch[executor.submit(embed_batch, batch)] = (i, batch)
+            
+            for future in as_completed(future_to_batch):
+                i, batch = future_to_batch[future]
+                start_time = time.time()
+                try:
+                    embeddings = future.result()
+                    vectors = [
+                        (
+                            f"doc_{i * batch_size + j}",
+                            emb,
+                            {**doc.metadata, "content": doc.page_content} if doc.metadata else {"content": doc.page_content}
+                        )
+                        for j, (emb, doc) in enumerate(zip(embeddings, batch))
+                    ]
+                    index = self.pinecone_instance.Index(self.pinecone_config["PINECONE_INDEX"])
+                    index.upsert(vectors=vectors, namespace=self.pinecone_config.get("namespace", None))
+                    logger.info(f"Batch {i + 1} uploaded in {time.time() - start_time:.2f} seconds")
+                except Exception as e:
+                    logger.error(f"Failed to process batch {i + 1}: {e}")
+                    raise
+        
+        logger.info(f"Total upload time: {time.time() - total_start_time:.2f} seconds")
 
     def process_github_repo(self, repo_url: str, branch: str = "master"):
         """Clone GitHub repo using SSH and index Markdown files in Pinecone."""
         temp_dir = tempfile.mkdtemp()
+        total_start_time = time.time()
         try:
             # Clear index before indexing new content
             self.clear_index()
@@ -268,12 +299,12 @@ Answer:"""
                 logger.warning(f"No Markdown files found in {repo_url}/docs")
                 return
             
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             split_docs = text_splitter.split_documents(docs)
             logger.info(f"Split {len(docs)} documents into {len(split_docs)} chunks")
             
-            self._upload_documents_in_batches(split_docs, batch_size=20)
-            logger.info(f"Indexed {len(split_docs)} document chunks from {repo_url}")
+            self._upload_documents_in_batches(split_docs, batch_size=50)
+            logger.info(f"Indexed {len(split_docs)} document chunks from {repo_url} in {time.time() - total_start_time:.2f} seconds")
             
         except Exception as e:
             logger.error(f"Failed to process GitHub repository {repo_url}: {e}")
@@ -295,11 +326,11 @@ Answer:"""
             else:
                 raise ValueError("Unsupported file type")
             
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             chunks = text_splitter.split_text(text)
             docs = [Document(page_content=chunk, metadata={"source": uploaded_file.name}) for chunk in chunks]
             
-            self._upload_documents_in_batches(docs, batch_size=20)
+            self._upload_documents_in_batches(docs, batch_size=50)
             logger.info(f"Indexed {len(docs)} document chunks from {uploaded_file.name}")
         except Exception as e:
             logger.error(f"Failed to process uploaded file: {e}")

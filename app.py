@@ -37,7 +37,7 @@ def main():
         st.subheader("GitHub Repository")
         github_repo = st.text_input(
             "GitHub Repository URL",
-            value="git@github.com:ORIBData/docusaurus-.git",  # Corrected URL
+            value="git@github.com:ORIBData/docusaurus-.git",  
             placeholder="e.g., git@github.com:ORIBData/docusaurus-.git or https://github.com/ORIBData/docusaurus-"
         )
         branch = st.text_input("Branch", value="master")
@@ -83,12 +83,11 @@ def main():
                     st.error(f"Error processing document: {str(e)}")
     
     st.markdown("""
-    Welcome to Mark Musk, your AI assistant for CreditChek API integration! 
-    Ask me anything about:
-    - API endpoints and their usage
-    - Sample code in Python, NodeJS, PHP Laravel, or GoLang
-    - Best practices for integration
-    - Error handling and troubleshooting
+    ### Welcome to Mark Musk
+    Ask about CreditChek API integration! Try these:
+    - How do I set up webhooks for CreditChek transaction updates?
+    - How do I configure the RecovaPRO SDK?
+    - Show me a Python example for identity verification.
     """)
 
     # Initialize chat interface
