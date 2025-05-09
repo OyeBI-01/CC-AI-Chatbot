@@ -1,43 +1,39 @@
-import streamlit as st
 import os
-from typing import Dict, Any
+from dotenv import load_dotenv
+import logging
+import streamlit as st
 
-def setup_page_config() -> None:
-    """Configure the Streamlit page settings."""
-    st.set_page_config(
-        page_title="Mark Musk - CreditChek API Assistant",
-        page_icon="🤖",
-        layout="wide",
-        initial_sidebar_state="auto"
-    )
+logger = logging.getLogger(__name__)
+load_dotenv()
 
-def get_openai_config() -> Dict[str, Any]:
-    """Get OpenAI configuration from environment variables."""
-    return {
-        "api_key": os.getenv("OPENAI_API_KEY"),
-        "model": os.getenv("OPENAI_MODEL", "gpt-4-turbo-preview"),
-        "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
-        "max_tokens": int(os.getenv("OPENAI_MAX_TOKENS", "2000"))
-    }
-
-def get_pinecone_config() -> Dict[str, str]:
-    """Get Pinecone configuration from environment variables."""
-    return {
+def get_pinecone_config():
+    config = {
         "api_key": os.getenv("PINECONE_API_KEY"),
-        "environment": os.getenv("PINECONE_ENVIRONMENT"),
-        "index_name": os.getenv("PINECONE_INDEX_NAME", "creditchek-docs")
+        "PINECONE_ENVIRONMENT": os.getenv("PINECONE_ENVIRONMENT", "us-east1-aws"),
+        "PINECONE_INDEX": os.getenv("PINECONE_INDEX"),
+        "namespace": os.getenv("PINECONE_NAMESPACE", None)
+    }
+    logger.info(f"get_pinecone_config output: {config | {'api_key': '***'}}")
+    return config
+
+def get_openai_config():
+    return {
+        "api_key": os.getenv("GOOGLE_API_KEY"),
+        "model": "gemini-2.0-flash",
+        "temperature": 0.7
     }
 
-def get_app_config() -> Dict[str, Any]:
-    """Get application configuration."""
+def get_app_config():
     return {
         "doc_url": "https://docs.creditchek.africa",
-        "supported_languages": [
-            "Python",
-            "NodeJS",
-            "PHP Laravel",
-            "GoLang"
-        ],
+        "supported_languages": ["Python", "NodeJS", "PHP Laravel", "GoLang"],
         "chunk_size": 1000,
         "chunk_overlap": 200
-    } 
+    }
+
+def setup_page_config():
+    st.set_page_config(
+        page_title="Mark Musk - CreditChek API Assistant",
+        page_icon=":robot:",
+        layout="wide"
+    )

@@ -26,7 +26,7 @@ def get_openai_config():
 
 def get_app_config():
     return {
-        "supported_languages": ["Python", "NodeJS", "PHP Laravel", "GoLang"]
+        "supported_languages": ["Python", "NodeJS", "PHP Laravel", "GoLang", "Ruby", "ASP.NET", "Java"]
     }
 
 def setup_page_config():
