@@ -28,39 +28,52 @@ logger = logging.getLogger(__name__)
 class BotService:
     def __init__(self, fastapi_url: str):
         self.fastapi_url = fastapi_url
+        self.forced_language = None
+        self.current_frameworks = []
+        
         try:
             self.app_config = get_app_config()
-            if not isinstance(self.app_config, dict) or "supported_languages" not in self.app_config:
-                raise ValueError("get_app_config must return a dictionary with 'supported_languages'")
-            # Add supported frameworks for Python
+            if not isinstance(self.app_config, dict):
+                raise ValueError("get_app_config must return a dictionary")
+                
             self.app_config["supported_frameworks"] = {
                 "Python": ["Flask", "FastAPI", "Django"],
+                "JavaScript": ["Express", "Koa", "NestJS"],
                 "NodeJS": ["Express"],
-                "PHP Laravel": ["Laravel"],
-                "GoLang": ["net/http"]
+                "PHP": ["Laravel", "Slim"],
+                "Go": ["net/http", "Gin", "Echo"],
+                "Java": ["Spring", "Jakarta EE"],
+                "C#": [".NET", "ASP.NET Core"],
+                "Ruby": ["Rails", "Sinatra"],
+                "Rust": ["Actix", "Rocket"],
+                "Swift": ["Vapor", "Perfect"],
+                "Kotlin": ["Ktor", "Spring Boot"],
+                "Other": ["Standard Library"]
             }
+            
+            if "supported_languages" not in self.app_config:
+                self.app_config["supported_languages"] = list(self.app_config["supported_frameworks"].keys())
+                
         except Exception as e:
             logger.error(f"Failed to load app_config: {e}")
-            raise ValueError("get_app_config must return a dictionary with 'supported_languages' and 'supported_frameworks'")
-        logger.info(f"App config: {self.app_config}")
+            raise ValueError("Invalid app configuration")
+            
         try:
             self.pinecone_config = get_pinecone_config()
             if not isinstance(self.pinecone_config, dict):
                 raise ValueError("get_pinecone_config must return a dictionary")
-            if not self.pinecone_config.get("PINECONE_INDEX") or not isinstance(self.pinecone_config["PINECONE_INDEX"], str):
-                logger.warning("PINECONE_INDEX is missing or invalid, defaulting to 'creditchek-docs'")
+            if not self.pinecone_config.get("PINECONE_INDEX"):
                 self.pinecone_config["PINECONE_INDEX"] = "creditchek-docs"
         except Exception as e:
             logger.error(f"Failed to load pinecone_config: {e}")
-            raise ValueError("get_pinecone_config must return a dictionary with a valid 'PINECONE_INDEX'")
-        logger.info(f"Pinecone config: {self.pinecone_config | {'api_key': '***'}}")
+            raise
+
         self.pinecone_instance = Pinecone(api_key=os.getenv("PINECONE_API_KEY") or self.pinecone_config.get("api_key"))
         self.index = self.create_index()
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model="models/text-embedding-004",
             google_api_key=os.getenv("GOOGLE_API_KEY")
         )
-        logger.info(f"Using embedding model: text-embedding-004 (768 dimensions)")
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash",
             api_key=os.getenv("GOOGLE_API_KEY"),
@@ -71,79 +84,40 @@ class BotService:
             return_messages=True,
             output_key="answer"
         )
-        self.agent_prompt = PromptTemplate.from_template(
-            """You are Mark Musk, an AI assistant for CreditChek API and SDK integration.
-            Your goal is to provide detailed, code-focused answers using tools and reasoning.
-            Available tools:
-            - document_retrieval: Search Pinecone for CreditChek docs (returns up to 3 documents).
-            - mock_creditchek_api: Simulate CreditChek API calls (e.g., /api/v1/repayments).
-            - code_generator: Generate SDK or webhook code snippets in supported languages: {supported_languages}.
-            Supported frameworks for Python: {supported_frameworks_python}.
-
-            Query: {query}
-            Chat History: {chat_history}
-
-            Steps:
-            1. Analyze the query to identify required tools, steps, preferred programming language, and framework.
-            2. Use tools as needed (e.g., retrieve docs, simulate API, generate code in the specified language and framework).
-            3. Combine results into a detailed, code-focused answer.
-            4. If information is missing, explain and suggest next steps.
-
-            Return a valid JSON plan in the following format:
-            ```json
-            {
-                "plan": {
-                    "steps": [
-                        {"tool": "document_retrieval", "params": {"query": "webhooks"}, "description": "Retrieve webhook docs"},
-                        {"tool": "code_generator", "params": {"language": "Python", "framework": "Flask", "task": "webhook"}, "description": "Generate Python webhook code"}
-                    ]
-                }
-            }
-            ```
-            Ensure proper JSON structure with no trailing commas or syntax errors. If you cannot generate a valid plan, return:
-            ```json
-            {"plan": {"steps": []}}
-            ```"""
-        ).partial(
-            supported_languages=", ".join(self.app_config["supported_languages"]),
-            supported_frameworks_python=", ".join(self.app_config["supported_frameworks"]["Python"])
-        )
-        self.sample_docs = [
-            Document(
-                page_content="To authenticate with CreditChek API, you need to obtain an API key from the dashboard. Include it in the header of all requests as 'Authorization: Bearer YOUR_API_KEY'. All API requests must be made over HTTPS to ensure security.",
-                metadata={"source": "sample_auth", "content": "..."}
-            ),
-            Document(
-                page_content="CreditChek API provides identity verification through the /api/v1/identity endpoint. This endpoint requires parameters like first_name, last_name, dob, and id_number.",
-                metadata={"source": "sample_identity", "content": "..."}
-            ),
-            Document(
-                page_content="The CreditChek API provides repayment breakdowns via GET /api/v1/repayments?customer_id={id}. Include 'Authorization: Bearer YOUR_API_KEY' header. Response includes payment_date, principal, interest, total_payment, and remaining_balance. Example: {'payments': [{'date': '2025-05-01', 'principal': 100, 'interest': 10, 'total_payment': 110, 'balance': 900}, ...]}. RecovaPRO SDK: Use client.get_repayment_schedule(customer_id).",
-                metadata={"source": "sample_repayments", "content": "..."}
-            ),
-            Document(
-                page_content="CreditChek webhooks: Register a URL in the dashboard to receive POST requests with transaction updates (transaction_id, status, amount, timestamp). Verify x-auth-signature header using LiveSecretKey. Example payload: {'transaction_id': '123', 'status': 'completed', 'amount': 100.50, 'timestamp': '2025-05-08T12:00:00Z'}. Supported frameworks for Python: Flask (lightweight, simple), FastAPI (async, high-performance), Django (robust, full-featured). Choose Flask for simplicity, FastAPI for async needs, or Django for existing Django projects.",
-                metadata={"source": "sample_webhooks", "content": "..."}
-            ),
-            Document(
-                page_content="RecovaPRO SDK: To configure, install the SDK using `pip install creditchek`. Obtain your API key from the CreditChek dashboard and store it in an environment variable (e.g., using `python-dotenv`). Initialize with `from creditchek import RecovaPRO; client = RecovaPRO(api_key=os.environ.get('CREDITCHEK_API_KEY'))`. Use methods like `client.verify_identity(first_name='John', last_name='Doe', dob='1985-01-01')` or `client.get_repayment_schedule(customer_id='12345')`. Refer to https://docs.creditchek.africa for full documentation. If the `creditchek` library is unavailable, contact CreditChek support or use raw API calls.",
-                metadata={"source": "sample_sdk", "content": "..."}
-            )
-        ]
         self.init_document_store()
 
+    def set_language_preference(self, language: str):
+        """Force the bot to use a specific programming language"""
+        self.forced_language = language
+        logger.info(f"Language preference set to: {language}")
+        
+        if language in self.app_config["supported_frameworks"]:
+            self.current_frameworks = self.app_config["supported_frameworks"][language]
+        else:
+            self.current_frameworks = ["Standard Library"]
+        logger.debug(f"Available frameworks: {self.current_frameworks}")
+
     def create_index(self):
+        """Create or connect to Pinecone index"""
         index_name = self.pinecone_config["PINECONE_INDEX"]
-        existing_indexes = [index["name"] for index in self.pinecone_instance.list_indexes()]
-        if index_name not in existing_indexes:
-            logger.info(f"Creating Pinecone index: {index_name}")
-            self.pinecone_instance.create_index(
-                name=index_name,
-                dimension=768,
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region=self.pinecone_config.get("PINECONE_ENVIRONMENT", "us-east1-aws"))
-            )
-        return self.pinecone_instance.Index(index_name)
+        try:
+            existing_indexes = [index["name"] for index in self.pinecone_instance.list_indexes()]
+            if index_name not in existing_indexes:
+                self.pinecone_instance.create_index(
+                    name=index_name,
+                    dimension=768,
+                    metric="cosine",
+                    spec=ServerlessSpec(
+                        cloud="aws",
+                        region=self.pinecone_config.get("PINECONE_ENVIRONMENT", "us-east1-aws")
+                    )
+                )
+                time.sleep(1)
+            return self.pinecone_instance.Index(index_name)
+        except Exception as e:
+            logger.error(f"Failed to create/connect to index: {e}")
+            raise
+
 
     def init_document_store(self):
         logger.info("Initializing document store with sample documents")
@@ -288,9 +262,20 @@ class BotService:
         return {"error": "Endpoint not supported"}
 
     def _code_generator_tool(self, language: str, task: str, framework: str = None) -> str:
+        """Generate code snippets for any programming language with graceful fallback"""
         language = language.lower()
         framework = framework.lower() if framework else None
+        
+        # First check if we have a specific implementation
+        specific_code = self._get_specific_implementation(language, task, framework)
+        if specific_code:
+            return specific_code
+            
+        # Generic implementation for unsupported languages
+        return self._generate_generic_code(language.capitalize(), task, framework)
 
+    def _get_specific_implementation(self, language: str, task: str, framework: str) -> Optional[str]:
+        """Handle specific language implementations"""
         if language == "python" and "webhook" in task.lower():
             if framework == "fastapi":
                 return """import os
@@ -320,12 +305,10 @@ async def webhook_handler(request: Request):
     try:
         data = await request.json()
         print(f"Webhook received: {data}")
-        # Process webhook data here (e.g., update database, send notifications)
         return {"status": "OK"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-"""
-            elif framework == "Django":
+        raise HTTPException(status_code=500, detail=str(e))"""
+            elif framework == "django":
                 return """import os
 import hmac
 import hashlib
@@ -341,7 +324,7 @@ def verify_webhook_signature(request_body: bytes, x_auth_signature: str, live_se
 @csrf_exempt
 @require_POST
 def webhook_handler(request):
-    request_body = request.body
+    request_body = request.body()
     x_auth_signature = request.META.get("HTTP_X_AUTH_SIGNATURE")
     live_secret_key = os.environ.get("CREDITCHEK_LIVE_SECRET_KEY")
 
@@ -354,11 +337,9 @@ def webhook_handler(request):
     try:
         data = json.loads(request_body)
         print(f"Webhook received: {data}")
-        # Process webhook data here (e.g., update database, send notifications)
         return HttpResponse("OK", status=200)
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
-"""
+        return JsonResponse({"error": str(e)}, status=500)"""
             else:  # Default to Flask
                 return """from flask import Flask, request, jsonify
 import hmac
@@ -386,10 +367,10 @@ def webhook_handler():
     try:
         data = request.get_json()
         print(f"Webhook received: {data}")
-        # Process webhook data here (e.g., update database, send notifications)
         return "OK", 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500"""
+                
         elif language == "python" and ("sdk" in task.lower() or "configure" in task.lower()):
             return """import os
 from creditchek import RecovaPRO
@@ -409,9 +390,9 @@ try:
     schedule = client.get_repayment_schedule(customer_id='12345')
     print(f"Repayment Schedule: {schedule}")
 except Exception as e:
-    print(f"Error retrieving repayment schedule: {e}")
-"""
-        elif language == "nodejs" and "webhook" in task.lower():
+    print(f"Error retrieving repayment schedule: {e}")"""
+                
+        elif language in ["javascript", "nodejs"] and "webhook" in task.lower():
             return """const express = require('express');
 const crypto = require('crypto');
 const app = express();
@@ -442,7 +423,8 @@ app.post('/webhook', (req, res) => {
 });
 
 app.listen(3000, () => console.log('Webhook server running on port 3000'));"""
-        elif language == "nodejs" and ("sdk" in task.lower() or "configure" in task.lower()):
+                
+        elif language in ["javascript", "nodejs"] and ("sdk" in task.lower() or "configure" in task.lower()):
             return """const RecovaPRO = require('recovapro');
 
 // Initialize the RecovaPRO SDK with your API key
@@ -456,9 +438,9 @@ client.verifyIdentity({ firstName: 'John', lastName: 'Doe', dob: '1985-01-01' })
 // Example: Get repayment schedule
 client.getRepaymentSchedule({ customerId: '12345' })
     .then(schedule => console.log(schedule))
-    .catch(err => console.error(err));
-"""
-        elif language == "php laravel" and "webhook" in task.lower():
+    .catch(err => console.error(err));"""
+                
+        elif language == "php" and "webhook" in task.lower():
             return """<?php
 
 namespace App\Http\Controllers;
@@ -480,16 +462,16 @@ class WebhookController extends Controller
 
         $signature = hash_hmac('sha256', $requestBody, $liveSecretKey);
 
-        if (!hash_equals($signature, xAuthSignature)) {
+        if (!hash_equals($signature, $xAuthSignature)) {
             return response()->json(['error' => 'Invalid signature'], 401);
         }
 
         \Log::info('Webhook received: ' . json_encode($request->all()));
         return response('OK', 200);
     }
-}
-"""
-        elif language == "php laravel" and ("sdk" in task.lower() or "configure" in task.lower()):
+}"""
+                
+        elif language == "php" and ("sdk" in task.lower() or "configure" in task.lower()):
             return """<?php
 
 use CreditChek\RecovaPRO;
@@ -515,9 +497,9 @@ try {
     \Log::info('Repayment schedule: ' . json_encode($schedule));
 } catch (\Exception $e) {
     \Log::error('Error retrieving repayment schedule: ' . $e->getMessage());
-}
-"""
-        elif language == "golang" and "webhook" in task.lower():
+}"""
+                
+        elif language == "go" and "webhook" in task.lower():
             return """package main
 
 import (
@@ -553,7 +535,7 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    if (!verifyWebhookSignature(requestBody, xAuthSignature, liveSecretKey)) {
+    if !verifyWebhookSignature(requestBody, xAuthSignature, liveSecretKey) {
         http.Error(w, `{"error": "Invalid signature"}`, http.StatusUnauthorized)
         return
     }
@@ -567,9 +549,9 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
     http.HandleFunc("/webhook", webhookHandler)
     log.Fatal(http.ListenAndServe(":8080", nil))
-}
-"""
-        elif language == "golang" and ("sdk" in task.lower() or "configure" in task.lower()):
+}"""
+                
+        elif language == "go" and ("sdk" in task.lower() or "configure" in task.lower()):
             return """package main
 
 import (
@@ -599,9 +581,123 @@ func main() {
         log.Fatalf("Repayment schedule failed: %v", err)
     }
     log.Printf("Repayment schedule: %v", schedule)
-}
-"""
-        return f"// {language} code for {task} (framework: {framework or 'none'})\n// Not implemented"
+}"""
+                
+        return None
+
+    def _generate_generic_code(self, language: str, task: str, framework: str = None) -> str:
+        """Generate generic code template for unsupported languages"""
+        if "webhook" in task.lower():
+            return f"""// {language} webhook implementation ({framework or 'standard'} framework)
+// 1. Set up a web server that can handle HTTP POST requests
+// 2. Create an endpoint to receive CreditChek webhook notifications
+// 3. Verify the x-auth-signature header using your LiveSecretKey
+//    - Compare the signature using HMAC-SHA256
+// 4. Process the incoming webhook data securely
+        
+// Sample payload structure:
+// {{
+//   "transaction_id": "123",
+//   "status": "completed|failed|pending",
+//   "amount": 100.50,
+//   "timestamp": "2025-05-08T12:00:00Z"
+// }}
+
+// Security considerations:
+// - Always validate the webhook signature
+// - Use HTTPS for your webhook endpoint
+// - Implement proper error handling
+// - Consider rate limiting to prevent abuse
+// - Store the LiveSecretKey securely (environment variables/secret manager)
+
+// Next steps:
+// 1. Register your webhook URL in the CreditChek dashboard
+// 2. Test with sample payloads
+// 3. Implement your business logic for handling transactions"""
+        
+        elif "sdk" in task.lower() or "configure" in task.lower():
+            return f"""// {language} SDK usage example for CreditChek API
+// 1. Install the appropriate HTTP client/library for {language}
+// 2. Configure authentication with your API key:
+//    - Store the API key securely (environment variables/secret manager)
+//    - Include in requests as: Authorization: Bearer YOUR_API_KEY
+
+// Example API endpoints:
+// - Identity verification: POST /api/v1/identity
+// - Repayment schedule: GET /api/v1/repayments?customer_id=123
+// - Transaction status: GET /api/v1/transactions/123
+
+// Sample request (pseudo-code):
+// headers = {{
+//   "Authorization": "Bearer " + os.getenv("CREDITCHEK_API_KEY"),
+//   "Content-Type": "application/json"
+// }}
+// response = http.post("https://api.creditchek.africa/api/v1/identity", {{
+//   "first_name": "John",
+//   "last_name": "Doe",
+//   "dob": "1985-01-01",
+//   "id_number": "ID123456"
+// }}, headers)
+
+// Documentation:
+// - Full API reference: https://docs.creditchek.africa
+// - SDK installation: Check if an official {language} SDK exists
+// - Community libraries: Search for "CreditChek {language} SDK"
+
+// Error handling tips:
+// - Check for 401 Unauthorized (invalid API key)
+// - Handle rate limits (429 Too Many Requests)
+// - Implement retries for transient failures"""
+        
+        return f"""// {language} implementation for {task}
+// Framework: {framework or 'standard library'}
+
+// This is a generic template. For {language}-specific implementation:
+// 1. Consult the {language} documentation for HTTP server/client setup
+// 2. Review CreditChek API documentation at https://docs.creditchek.africa
+// 3. Adapt the patterns from our other language examples
+
+// Key requirements:
+// - Secure API key management
+// - Proper error handling
+// - HTTPS for all communications
+// - Webhook signature verification (if applicable)
+
+// For framework-specific guidance in {language}, consider:
+// {', '.join(self.app_config["supported_frameworks"].get(language, ["Standard Library"]))}"""
+
+    def _detect_language_and_framework(self, query: str) -> tuple[str, Optional[str]]:
+        """Detect language and framework with preference for forced_language"""
+        query_lower = query.lower()
+        
+        # Use forced language if set
+        if self.forced_language:
+            language = self.forced_language
+            logger.debug(f"Using forced language: {language}")
+        else:
+            language = "Python"  # Default
+            for lang in self.app_config["supported_languages"]:
+                if lang.lower() in query_lower or f"in {lang.lower()}" in query_lower:
+                    language = lang
+                    break
+
+        # Framework detection
+        framework = None
+        supported_frameworks = self.app_config["supported_frameworks"].get(language, [])
+        
+        # First check query for framework mentions
+        for fw in supported_frameworks:
+            if fw.lower() in query_lower:
+                framework = fw
+                break
+                
+        # Then check current frameworks if none found
+        if not framework and self.current_frameworks:
+            framework = self.current_frameworks[0]
+
+        logger.debug(f"Detected language: {language}, framework: {framework}")
+        return language, framework
+        
 
     def select_tools(self, query: str) -> List[Dict[str, Any]]:
         """Analyze query and suggest tools to use."""
@@ -649,39 +745,6 @@ func main() {
             })
 
         return tools
-
-    def _detect_language_and_framework(self, query: str) -> tuple[str, Optional[str]]:
-        """Detect preferred programming language and framework from query and chat history."""
-        query_lower = query.lower()
-        chat_history = str(self.memory.load_memory_variables({})["chat_history"]).lower()
-
-        # Detect language
-        language = "Python"  # Default
-        for lang in self.app_config["supported_languages"]:
-            if lang.lower() in query_lower or f"in {lang.lower()}" in query_lower:
-                language = lang
-                break
-
-        # Detect framework
-        framework = None
-        supported_frameworks = self.app_config["supported_frameworks"].get(language, [])
-        for fw in supported_frameworks:
-            if fw.lower() in query_lower or f"in {fw.lower()}" in query_lower:
-                framework = fw
-                break
-        if not framework:
-            # Check chat history for framework mentions
-            for fw in supported_frameworks:
-                if fw.lower() in chat_history:
-                    framework = fw
-                    break
-        if not framework and language == "Python":
-            framework = "Flask"  # Default for Python
-        elif not framework:
-            framework = supported_frameworks[0] if supported_frameworks else None
-
-        logger.debug(f"Detected language: {language}, framework: {framework}")
-        return language, framework
 
     def generate_response(self, query: str) -> Dict[str, Any]:
         logger.info(f"Processing query: {query}")
@@ -960,14 +1023,6 @@ func main() {
                 },
                 "tool_results": []
             }
-
-    """def clear_index(self):
-        try:
-            index = self.pinecone_instance.Index(self.pinecone_config["PINECONE_INDEX"])
-            index.delete(delete_all=True, namespace=self.pinecone_config.get("namespace", None))
-            logger.info("Pinecone index cleared")
-        except Exception as e:
-            logger.error(f"Failed to clear index: {e}")"""
 
     def process_uploaded_doc(self, file_path: str):
         try:
