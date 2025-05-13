@@ -45,6 +45,7 @@ class ChatInterface:
             
             # Language selection with custom option - FIXED SYNTAX
             # language_options = self.supported_languages + ["Other..."]
+            # language_options = self.supported_languages + ["Other..."]
             language_options = self.supported_languages
             selected_language = st.selectbox(
                 "Select Programming Language",
